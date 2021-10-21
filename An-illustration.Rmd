@@ -1,0 +1,221 @@
+---
+title: "An illustration"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Required packages
+
+The package ``gurobi'' requires installing Gurobi in local computer, and obtain a license from its website.
+
+```{r}
+require(Matrix)
+require(gurobi)
+```
+
+
+## A function to generate optimal designs
+
+This function generates optimal design with and without network connections. If no network adjacency matrix W is loaded in the function, the function will give optimal design with respect to covariates balance only. The default settings are $\alpha=0.001$, $\rho=0.5$,
+and the timelimit to solve an optimization problem in Gurobi is 500 secs. 
+
+```{r}
+opt.design <- function(Z, W=NA, alpha=0.001, rho=0.5, timelimit=500) {
+  ##################################################################
+  # Function for optimal design with and without network
+  # Inputs:
+  # Z: covariate matrix, intercept not included
+  # W: network adjacency matrix (NOT USED FOR network==F)
+  # alpha: quantile parameter (NOT USED FOR network==F)
+  # rho: network correlation parameter  (NOT USED FOR network==F)
+  # timelimit (in sec): timelime in solving the optimization problem
+  #
+  # Outputs:
+  # optimal allocation (-1, 1)
+  #################################################################
+  require(gurobi)
+  require(Matrix)
+  
+  # common statistics
+  Fmat <- cbind(1, Z)
+  
+  
+  # setup global parameters
+  params <- list(MIPGap=0.01, TimeLimit=timelimit)
+  
+  
+  # setup optimization model
+  model <- list()
+  
+  # setup linear constraint 
+  model$A     <- matrix(1, 1, n)
+  model$rhs   <- round(n/2) # to compile with the case that n is odd
+  model$sense <- c("=")
+  
+  # set up decision variable type
+  model$vtype <- rep('B', n)
+  
+  # with or without network
+  
+  network <- !is.na(sum(W))
+  
+  if(network == TRUE) {
+    # network statistics
+    n <- nrow(W)
+    nedge <- rowSums(W)
+    
+    # set up quadratic objective
+    Sigma.net <- Diagonal(n, x = nedge)-rho*W
+    Fsig <- t(Fmat) %*% Sigma.net
+    Sigma <- Fsig %*% Fmat		
+    Q <- as.matrix(t(Fsig) %*% solve(Sigma, Fsig))
+    model$Q     <- Q
+    model$obj   <- -rowSums(Q)
+    
+    # set up quadratic constraint
+    model$quadcon <- list()
+    qc <- list()
+    qc$Qc <- 4*W
+    qc$q <- -4*rowSums(W)
+    qc$rhs <- sqrt(sum(nedge))*qnorm(alpha)-sum(W)
+    model$quadcon[[1]] <- qc
+    
+  } 
+
+  if(network == FALSE) {
+    # set up quadratic objective
+    Finv <- solve(t(Fmat) %*% Fmat, t(Fmat))
+    Q <- as.matrix(Fmat %*% Finv)
+    model$Q     <- Q
+    model$obj   <- -rowSums(Q)
+  }
+  
+  # solve the problem with gurobi
+  result <-gurobi(model, params)  
+  return(2*result$x-1)
+}
+```
+
+
+## Generate Data 
+
+```{r}
+n <- 100
+p <- 10
+net.p <- 0.08 # network density
+
+# generate the covariates
+Z <- matrix(sample(c(-1, 1), n*p, replace=TRUE), n, p)
+
+# generate the network
+W <- sample(c(0, 1), n*n, replace=TRUE, prob=c(1-net.p/2,net.p/2))
+W <- matrix(W, n, n)
+W <- 1*((W+t(W))>0)
+diag(W) <- 0
+```
+
+## Generate Optimal Designs
+
+
+```{r}
+# optimal design with network 
+x.opt <- opt.design(Z, W)
+    
+# optimal design without network
+x.opt0 <- opt.design(Z)
+```
+
+
+## Evaluation Function
+
+A function to compute the key statistics given a design. The value $\rho$ is the true correlation coefficient. The outputs are explained as follows:
+
+- Impre: the improvement to precision in equation 17
+- obj: the objective value in equation 9 of the  given design 
+- Erand: expected objective value of the random design
+- T1: T1 of the given design
+- T2: T2 of the given design
+- ET1: expected T1 value of the random design
+- ET2: expected T2 value of the random design
+- 1*(flag==0): a flag demonstrate an appropriate design is loaded. 
+
+```{r}
+evaluate <- function(x, W, Z, rho) {
+  ##################################################################
+  # Function to compute evaluation criterion for a design under car model assumption
+  # Inputs:
+  # x: design vector allocation (-1, 1)
+  # W: network adjacency matrix 
+  # Z: covariates
+  # rho: network correlation parameter
+  #
+  # Outputs:
+  # Precentage of Improvement to Precision and others
+  #################################################################
+  
+  # compute statistics
+  n <- nrow(W)
+	nedge <- rowSums(W)
+  nedge.total <- sum(W)
+  p <- ncol(Z)
+  Erand <- -999
+  T1 <- -999
+  T2 <- -999
+  ImPre <- -999
+  obj <- -999
+  flag <- length(x)
+  
+  if(flag!=0) {
+    Rmat <- Diagonal(n, x =nedge)-rho*W
+    Fmat <- cbind(1, Z)
+	  Fsig <- t(Fmat) %*% Rmat
+	  xFsig <- Fsig %*% x
+    Sigma <- Fsig %*% Fmat
+          
+    # compute the objective
+    T1 <- rho * as.numeric(t(x)%*% W %*% x)
+    T2 <- as.numeric(t(xFsig) %*% solve(Sigma, xFsig))
+    obj <- nedge.total-T1-T2
+          
+    # compute the expected objective of random designs
+    KF <- t(Fsig) %*% solve(Sigma, Fsig)
+    K <- Rmat - KF
+    Erand <- sum(diag(K))
+    ET1 <- sum(diag(W))
+    ET2 <- sum(diag(KF))
+    
+    # compute improvementment of precision 
+    ImPre <- 1-Erand/obj
+  }
+  return(c(rho, ImPre, obj, Erand, T1, T2, ET1, ET2, 1*(flag==0)))
+}
+```
+
+
+## Evaluation of the optimal designs
+
+```{r}
+rho_true <- 0.7
+results <- evaluate(x.opt, W, Z, rho=rho_true)
+results <- rbind(results, evaluate(x.opt0, W, Z, rho=rho_true))
+results <- data.frame(results)
+names(results) <- c("rho_true", "ImprovePrecision", "Obj", "E(obj)", "T1", "T2", "ET1", "ET2", "error")
+results$network <- c(1, 0)
+results
+```
+
+
+## Connection of submitted files to numerical sections
+
+
+- Section 6: "synthetic.R" is the main file to generate all the results and figures.  
+
+- Section 7: "real.R" is the main file to generate the results in Figure 7, and draw the figure; "robust_re_real.R" is the main file to generates the results in Figure 8, and "report_results_robust.R" generates Figure 8.
+
+- Supplement: "gap.R" is the main file to generate figure S1. 
+
+
+
